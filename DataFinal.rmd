@@ -1,0 +1,1570 @@
+---
+title: "Data Science Project"
+output: html_notebook
+---
+
+# Student Information
+
+Jack Bradshaw, 250807060
+Will Malisch, 250846447
+Selina Phan, 250863526
+Sonaya Ravichandran, 250804258  
+
+# Data Set Description  
+
+This data set was collected by researchers at the Columbia Business School for a research study. The study gathered data in an speed dating events that took place from 2002 to 2004. 
+
+Participants filled out a quesionnaire before the speed dating event about their demographic information, beliefs of what they find valuable when evaluating a potential partner, self-perception about key attributes, and other lifestyle information. 
+
+After the 4-minute speed-dating meetings, participants indicated whether they wanted to see their date again, and they ranked their date on 6 attributes: Attractiveness, Sincerity, Intelligence, Fun, Ambition, and Shared Interests. 
+
+# Overview of Analysis 
+
+Our team conducted an extensive exploratory data analysis to identify demographic, psychographic, and lifestyle patterns in the study subjects. Additionally, we identified features around the "most desirable" subjects and the "least desirable" subjects (based on the number of matches they received). 
+
+Predictive modelling gave an error rate of around 20% to 30%, and identified the importance of key attributes in predicting whether or not a subject would decide to go on a date with another subject. 
+
+
+```{r}
+# Load libraries used for analysis
+library(tidyverse)
+library(cluster)
+library(factoextra)
+library(corrplot)
+library(ggplot2)
+library(dplyr)
+library(fmsb)
+library(FNN)
+library(class)
+library(randomForest)
+library(e1071)
+library(neuralnet)
+library(reshape2)
+library(rpart)
+library(rpart.plot)
+```
+
+```{r}
+# Load raw data
+dd_raw <- read.csv("C:/Users/malis/Downloads/Speed Dating Data.csv", header = TRUE)
+head(dd_raw)
+dd_raw <- dd_raw %>% 
+  mutate(pgender = ifelse(gender == 0, 1, 0))
+```
+
+```{r}
+# Identify relevant variables for Profile csv
+newnames <- c("iid","gender","age","field","field_cd","undergra","mn_sat","race","imprace","imprelig","income","goal","date","go_out","career_c","sports","tvsports","exercise","dining","museums","art","hiking","gaming","clubbing","reading","tv","theater","movies","concerts","music","shopping","yoga","exphappy","attr1_1","sinc1_1","intel1_1","fun1_1","amb1_1","shar1_1","attr2_1","sinc2_1","intel2_1","fun2_1","amb2_1","shar2_1","attr3_1","sinc3_1","intel3_1","fun3_1","amb3_1","attr4_1","sinc4_1","intel4_1","fun4_1","amb4_1","shar4_1","attr5_1","sinc5_1","intel5_1","fun5_1","amb5_1")
+# Create new dataset including only these columns and one entry for each iid
+dd_profiles <- data.frame()
+for (i in 1:max(dd_raw$iid)){
+  for (j in 1:length(newnames)){
+    row <- match(i,dd_raw$iid)
+    feature <- newnames[j]
+    dd_profiles[i,feature] <- dd_raw[row,feature]
+  }
+}
+dd_profiles <- dd_profiles[-118,]
+```
+
+## Custom Functions
+
+When working on this project, certain functions were used repeatedly for multiple outputs. I created custom functions to improve readability and reduce repetitive coding.
+
+```{r}
+# Create function that pulls all features containing a string
+pull_feat <- function(x){
+  dd_raw %>%
+  select(iid, gender, age, race, contains(x)) %>%
+  filter(!iid == 118) %>%
+  unique()
+}
+```
+
+```{r}
+# Create function to check for NAs
+check_na <- function(x){
+  variable <- c()
+  nulls <- c()
+  for (i in 1:dim(x)[2]){
+    variable[i] <- names(x)[i]
+    nulls[i] <- sum(is.na(x[,i]))
+  }
+  data.frame(variable, nulls)
+}
+```
+
+```{r}
+# Create function that checks for inconsistency, normalizes responses and removes blank answers, as well as fixes 
+norm_clean <- function(set, scale){
+  
+  # Fill in NAs in age and race
+  set$age[is.na(set$age) == TRUE] <- round(mean(set$age[is.na(set$age) == FALSE]),0)
+  set$race[is.na(set$race) == TRUE] <- 2
+  
+  # Check for inconsistent responses
+  set[is.na(set)] <- 0
+  set$sum <- rowSums(set[,attribute])
+  
+  # If scale = true, remove rows with no responses, normalize other rows
+  # Scale allows for flexibility between the data that sums to 100 points and the data that has independent ratings from 0 to 10
+  set <- subset(set, set$sum != 0)
+  if (scale == TRUE){
+    for (i in 1:dim(set)[1]){
+      for (j in 1:6){
+        set[i,attribute[j]] <- round((set[i,attribute[j]]/set$sum[i]*100),2)
+      }
+      set$sum[i] <- round(sum(set[i,attribute]),0)
+    }
+  }  
+  return(set)
+}
+```
+
+
+
+```{r}
+# Create function to simplify radarchart output
+rc_output <- function(group1, group2, max, min, colour1, colour2, chart_title, legend1, legend2){
+
+  # Prepare data for radar chart
+  maxmin <- data.frame(
+   Attractive = c(max, min),
+   Sincere = c(max, min),
+   Intelligent = c(max, min),
+   Fun = c(max, min),
+   Ambitious = c(max, min),
+   Interests = c(max, min))
+  table <- rbind(maxmin,group1,group2)
+  
+  # Plot comparison of gender preferences
+  rc_chart <- 
+    radarchart(table, 
+             axistype = 0, 
+             seg = 5, 
+             pty = 18,
+             pcol = c(colour1,colour2), 
+             pfcol = c(colour1, colour2),
+             plty = 1,
+             plwd = 2,
+             cglty = 1,
+             cglcol = "gray90",
+             title = chart_title,
+             vlcex = 0.8,
+             centerzero = TRUE)
+  
+  legend("topleft", c(legend1, legend2), border = "white", cex = 0.8, box.col = "white", fill = c(colour1, colour2))
+  return(rc_chart)
+}
+```
+
+```{r}
+# Create custom colours
+fem1 <- rgb(red = 1, green = 0, blue = 0, alpha = 0.4)
+mal1 <- rgb(red = 0, green = 0, blue = 1, alpha = 0.5)
+fem2 <- rgb(red = 0.7, green = 0.4, blue = 0, alpha = 0.4)
+mal2 <- rgb(red = 0, green = 0.4, blue = 0.7, alpha = 0.5)
+```
+
+#### Exploratory Data Analysis
+
+```{r}
+# Create subset for modification
+dd_prof <- dd_profiles
+
+# Label the race data into the names of the race groupings 
+dd_profiles$race[dd_prof$race=="1"] = "African"
+dd_prof$race[dd_prof$race=="2"] = "European"
+dd_prof$race[dd_prof$race=="3"] = "Latino"
+dd_prof$race[dd_prof$race=="4"] = "Asian"
+dd_prof$race[dd_prof$race=="6"] = "Other"
+
+dd_prof$race <- as.factor(dd_prof$race)
+```
+
+```{r}
+# Label the field data into the names of the field groupings based on the data key 
+
+dd_prof$field_cd[dd_prof$field_cd=="1"] = "Law"
+dd_prof$field_cd[dd_prof$field_cd=="2"] = "Math"
+dd_prof$field_cd[dd_prof$field_cd=="3"] = "Social Science"
+dd_prof$field_cd[dd_prof$field_cd=="4"] = "Medicine"
+dd_prof$field_cd[dd_prof$field_cd=="5"] = "Engineering"
+dd_prof$field_cd[dd_prof$field_cd=="6"] = "Literature"
+dd_prof$field_cd[dd_prof$field_cd=="7"] = "Philosophy"
+dd_prof$field_cd[dd_prof$field_cd=="8"] = "Business"
+dd_prof$field_cd[dd_prof$field_cd=="9"] = "Education"
+dd_prof$field_cd[dd_prof$field_cd=="10"] = "Science"
+dd_prof$field_cd[dd_prof$field_cd=="11"] = "Social Work"
+dd_prof$field_cd[dd_prof$field_cd=="12"] = "Undecided"
+dd_prof$field_cd[dd_prof$field_cd=="13"] = "Political Science"
+dd_prof$field_cd[dd_prof$field_cd=="14"] = "Film"
+dd_prof$field_cd[dd_prof$field_cd=="15"] = "Arts"
+dd_prof$field_cd[dd_prof$field_cd=="16"] = "Languages"
+dd_prof$field_cd[dd_prof$field_cd=="17"] = "Architecture"
+dd_prof$field_cd[dd_prof$field_cd=="18"] = "Other"
+
+dd_prof$field_cd <- as.factor(dd_prof$field_cd)
+```
+
+```{r}
+# Label the field data into the names of the field groupings based on the data key 
+
+dd_prof$career_c[dd_prof$career_c=="1"] = "Law"
+dd_prof$career_c[dd_prof$career_c=="2"] = "Academia"
+dd_prof$career_c[dd_prof$career_c=="3"] = "Psychologist"
+dd_prof$career_c[dd_prof$career_c=="4"] = "Medicine"
+dd_prof$career_c[dd_prof$career_c=="5"] = "Engineer"
+dd_prof$career_c[dd_prof$career_c=="6"] = "Entertainment"
+dd_prof$career_c[dd_prof$career_c=="7"] = "Business"
+dd_prof$career_c[dd_prof$career_c=="8"] = "Real Estate"
+dd_prof$career_c[dd_prof$career_c=="9"] = "Humanitarian Affairs"
+dd_prof$career_c[dd_prof$career_c=="10"] = "Undecided"
+dd_prof$career_c[dd_prof$career_c=="11"] = "Social Work"
+dd_prof$career_c[dd_prof$career_c=="12"] = "Speech Pathology"
+dd_prof$career_c[dd_prof$career_c=="13"] = "Politics"
+dd_prof$career_c[dd_prof$career_c=="14"] = "Athletics"
+dd_prof$career_c[dd_prof$career_c=="15"] = "Other"
+dd_prof$career_c[dd_prof$career_c=="16"] = "Journalism"
+dd_prof$career_c[dd_prof$career_c=="17"] = "Architecture"
+
+dd_prof$career_c <- as.factor(dd_prof$career_c)
+```
+
+
+```{r}
+# Build a ggplot of ages in the dataset
+# Remove NAs from the race data feature
+
+agedata <- subset(dd_prof, complete.cases(dd_prof$age))
+```
+
+```{r}
+# Build a ggplot of the age groups in the data set
+
+age_plot <- ggplot(agedata, aes(x = age)) + geom_bar(fill="steelblue") + ggtitle("Different ages in the data set")
+age_plot
+```
+Majority of the subjects fall between the 20 - 30 age category. The highest number of subjects are aged 27.
+
+```{r}
+# Build a ggplot of races in the dataset
+# Remove NAs from the race data feature 
+
+racedata <- subset(dd_prof, complete.cases(dd_prof$race))
+```
+
+```{r}
+# Plot race ggplot with labelled names 
+
+race_plot <- ggplot(racedata, aes(x = race)) + geom_bar(fill="steelblue") + ggtitle("Different racial groups in the data set")
+race_plot
+```
+Majority of the subjects in this dataset are Caucasian. 
+
+```{r}
+# Build a ggplot of field of undergraduate degrees in the dataset
+# Remove NAs in the field code features 
+
+fielddata <- subset(dd_prof, complete.cases(dd_prof$field_cd))
+```
+
+```{r}
+# Plot fields ggplot with labelled names 
+
+field_plot <- ggplot(fielddata, aes(x = field_cd)) + geom_bar(fill="steelblue")
+field_plot + coord_flip() +ggtitle("Fields of undergraduate degree") + xlab("Field") + ylab("Count")
+```
+
+Majority of the fields of study are in business, science, and engineering. This makes sense due to the nature of the participants in the data set, as they are all students of Columbia University as the study was done at the Columbia Business School. 
+
+```{r}
+# Build a ggplot of career fields for the subjects in the data set
+# Remove NAs in the career code features 
+
+careerdata <- subset(dd_prof, complete.cases(dd_prof$career_c))
+```
+
+```{r}
+# Build ggplot with career fields for subjects
+
+career_plot <- ggplot(careerdata, aes(x = career_c)) + geom_bar(fill="steelblue")
+career_plot + coord_flip() +ggtitle("Career pursuits of study subjects") + xlab("Career") + ylab("Count")
+```
+
+Though the top 3 most common fields of study were business, science, and engineering, the top 3 careers of the study subjects were academia, business, and law. 
+
+## What are the characteristics of the males and females who received the greatest number of matches (most desirable) vs the ones who received the least number of matches (least desirable)? 
+
+```{r}
+# Read new dataset CSV into R
+
+dd_norm <- dd_raw
+```
+
+The **"most desirable"** group is defined as the subjects who were in the **top 25th percentile** of yesses received from their partners. 
+The **"undesirable"** group is defined as the subjects who were in the **bottom 25th percentile** of yesses received from their partners. 
+
+
+```{r}
+# Calculate number of yesses for a given iid
+
+nofyes = aggregate(dd_norm$dec_o, list(dd_norm$pid), sum)
+names(nofyes)= c("iid", "Number of Yes")
+dd_yes = merge(dd_prof, nofyes, by = "iid")
+```
+
+```{r}
+# Visualize the spread of number of matches received
+
+boxplot(dd_yes$`Number of Yes`, main = "Boxplot of an Individual's Success", ylab = "Number of Yesses", col = "steelblue")
+summary(dd_yes$`Number of Yes`)
+```
+
+The undesirable group has a small range of the yesses they received, between 0 and 3, while the desirable group saw a large range in the yesses they received, between 9 and 21.  
+
+```{r}
+# Separate the Top 25% (desirable) and Bottom 25% (undesirable) Subjects Based on # of Matches
+
+top <- dd_yes$`Number of Yes` >= 9
+topquarter <- subset(dd_yes[top,]) 
+bottom <- dd_yes$`Number of Yes` <= 3
+bottomquarter <- subset(dd_yes[bottom,]) 
+```
+
+These "top" and "bottom" groups will be used to analyze the features of the most desirable and undesirable groups. 
+
+### Desirable vs. undesirable age characteristics (male and female)
+
+```{r}
+# Build a ggplot of age data in the dataset for the undesirable group
+# Remove NAs from the race data feature 
+
+und.age <- subset(bottomquarter, complete.cases(bottomquarter$age))
+```
+
+```{r}
+# Plot race ggplot with labelled names 
+
+und.age_plot <- ggplot(und.age, aes(x = age)) + geom_bar(fill="tomato") + ggtitle("Undesirable age groups in the data set")
+und.age_plot
+```
+
+
+```{r}
+# Build a ggplot of age data in the dataset for the desirable group
+# Remove NAs from the race data feature 
+
+d.age <- subset(topquarter, complete.cases(topquarter$age))
+```
+
+```{r}
+# Plot race ggplot with labelled names 
+
+d.age_plot <- ggplot(d.age, aes(x = age)) + geom_bar(fill="steelblue") + ggtitle("Desirable age groups in the data set")
+d.age_plot
+```
+
+Overal, the desirable and undesirable groups don't really vary by age. However, the desirable group were slightly younger and skewed left towards younger people. The undesirable group were mostly between 20 and 30, skewing right towards older people. 
+
+### Desirable vs. undesirable race characteristics (male and female)
+
+
+```{r}
+# Build a ggplot of age data in the dataset for the undesirable group
+# Remove NAs from the race data feature 
+
+und.race <- subset(bottomquarter, complete.cases(bottomquarter$race))
+```
+
+```{r}
+# Plot race ggplot with labelled names 
+
+und.race_plot <- ggplot(und.race, aes(x = race)) + geom_bar(fill="tomato") + ggtitle("Undesirable race groups in the data set")
+und.race_plot
+```
+
+
+```{r}
+# Build a ggplot of race data in the dataset for the desirable group
+# Remove NAs from the race data feature 
+
+d.race <- subset(topquarter, complete.cases(topquarter$race))
+```
+
+```{r}
+# Plot race ggplot with labelled names 
+
+d.race_plot <- ggplot(d.race, aes(x = race)) + geom_bar(fill="steelblue") + ggtitle("Desirable race groups in the data set")
+d.race_plot
+```
+
+There are a larger portion of Asians, Latinos and Africans who are desirable, relative to Caucasians. 
+
+### Desirable vs. undesirable undergraduate degree characteristics (male and female)
+
+```{r}
+# Plot the Undergraduate Degrees of Undesireable People
+# Remove NAs from the race data feature 
+
+und.field <- subset(bottomquarter, complete.cases(bottomquarter$field_cd))
+```
+
+```{r}
+# Plot the Undergraduate Degrees of Undesireable People
+und.field_plot <- ggplot(und.field, aes(x = field_cd)) + geom_bar(fill="tomato")
+und.field_plot + coord_flip() +ggtitle("Fields of undergraduate degree for Undesireable Group") + xlab("Field") + ylab("Count")
+```
+
+
+```{r}
+# Plot the Undergraduate Degrees of Desireable People
+# Remove NAs from the degrees data features
+
+d.field <- subset(topquarter, complete.cases(topquarter$field_cd))
+```
+
+```{r}
+# Plot the Undergraduate Degrees of Desireable People
+
+d.field_plot <- ggplot(d.field, aes(x = field_cd)) + geom_bar(fill="steelblue")
+d.field_plot + coord_flip() +ggtitle("Fields of undergraduate degree for Desireable Group") + xlab("Field") + ylab("Count")
+```
+
+### Desirable vs. undesirable characteristics by gender
+
+```{r}
+# Create Two Datasets of Just Male Subjects and Just Female Subjects
+
+male <- dd_yes$gender == 1
+maleData <- subset(dd_yes[male,]) 
+female <- dd_yes$gender == 0
+femaleData <- subset(dd_yes[female,])
+
+```
+
+```{r}
+# Separate the Top 25% and Bottom 25% of Males Based on # of Matches
+
+topmale <- maleData$`Number of Yes` >= 4
+topmalequarter <- subset(maleData[topmale,]) 
+
+bottommale <- maleData$`Number of Yes` <= 1
+bottommalequarter <- subset(maleData[bottommale,]) 
+```
+
+```{r}
+# Separate the Top 25% and Bottom 25% of Females Based on # of Matches
+
+topfemale <- femaleData$`Number of Yes` >= 4
+topfemalequarter <- subset(femaleData[topfemale,]) 
+
+bottomfemale <- femaleData$`Number of Yes` <= 1
+bottomfemalequarter <- subset(femaleData[bottomfemale,]) 
+```
+
+### Desirable vs. undesirable age (male vs. female)
+
+```{r}
+# Plot the Ages of Desireable Males
+# Remove NAs from the degrees data features
+
+m.d.age <- subset(topmalequarter, complete.cases(topmalequarter$age))
+```
+
+```{r}
+# Plot the Ages of Desireable Males
+
+m.d.age_plot <- ggplot(m.d.age, aes(x = age)) + geom_bar(fill="steelblue")
+m.d.age_plot + ggtitle("Ages for Desireable Males") + xlab("Ages") + ylab("Count")
+
+```
+
+
+```{r}
+# Plot the Ages of Undesireable Males
+# Remove NAs from the ages data features
+
+m.und.age <- subset(bottommalequarter, complete.cases(bottommalequarter$age))
+```
+
+```{r}
+# Plot the Ages of Undesireable Males
+
+m.und.age_plot <- ggplot(m.und.age, aes(x = age)) + geom_bar(fill="tomato")
+m.und.age_plot +ggtitle("Ages for Undesireable Males") + xlab("Ages") + ylab("Count")
+
+```
+
+```{r}
+# Plot the Ages of Desireable Females
+# Remove NAs from the degrees data features
+
+f.d.age <- subset(topfemalequarter, complete.cases(topfemalequarter$age))
+```
+
+```{r}
+# Plot the Ages of Desireable Feales
+
+f.d.age_plot <- ggplot(f.d.age, aes(x = age)) + geom_bar(fill="steelblue")
+f.d.age_plot + ggtitle("Ages for Desireable Females") + xlab("Field") + ylab("Count")
+
+```
+
+
+```{r}
+# Plot the Ages of Undesireable Females
+# Remove NAs from the ages data features
+
+f.und.age <- subset(bottomfemalequarter, complete.cases(bottomfemalequarter$age))
+```
+
+```{r}
+# Plot the Ages of Undesireable Males
+
+f.und.age_plot <- ggplot(f.und.age, aes(x = age)) + geom_bar(fill="tomato")
+f.und.age_plot +ggtitle("Ages for Undesireable Females") + xlab("Field") + ylab("Count")
+
+```
+
+### Desirable vs. undesirable race (male vs. female)
+
+```{r}
+# Plot the Races of Desireable Males
+# Remove NAs from the degrees data features
+
+m.d.race <- subset(topmalequarter, complete.cases(topmalequarter$race))
+```
+
+```{r}
+# Plot the Ages of Desireable Males
+
+m.d.race_plot <- ggplot(m.d.race, aes(x = race)) + geom_bar(fill="steelblue")
+m.d.race_plot + ggtitle("Races for Desireable Males") + xlab("Races") + ylab("Count")
+
+```
+
+
+```{r}
+# Plot the Races of Undesireable Males
+# Remove NAs from the ages data features
+
+m.und.race <- subset(bottommalequarter, complete.cases(bottommalequarter$race))
+```
+
+```{r}
+# Plot the Ages of Undesireable Males
+
+m.und.race_plot <- ggplot(m.und.race, aes(x = race)) + geom_bar(fill="tomato")
+m.und.race_plot +ggtitle("Races for Undesireable Males") + xlab("Races") + ylab("Count")
+
+```
+
+```{r}
+# Plot the Races of Desireable Females
+# Remove NAs from the degrees data features
+
+f.d.race <- subset(topfemalequarter, complete.cases(topfemalequarter$race))
+```
+
+```{r}
+# Plot the Races of Desireable Feales
+
+f.d.race_plot <- ggplot(f.d.race, aes(x = race)) + geom_bar(fill="steelblue")
+f.d.race_plot + ggtitle("Races for Desireable Females") + xlab("Field") + ylab("Count")
+
+```
+
+
+```{r}
+# Plot the Races of Undesireable Females
+# Remove NAs from the ages data features
+
+f.und.race <- subset(bottomfemalequarter, complete.cases(bottomfemalequarter$race))
+```
+
+```{r}
+# Plot the Ages of Undesireable Males
+
+f.und.race_plot <- ggplot(f.und.race, aes(x = race)) + geom_bar(fill="tomato")
+f.und.race_plot +ggtitle("Races for Undesireable Females") + xlab("Field") + ylab("Count")
+
+```
+
+When comparing the race of undesirable men and women, there is a greater proportion of undesirable women who are Latino and African. For men, there is a greater proportion of undesirable men who are Asian. 
+
+### Undesirable undergraduate degree characteristics (male and female)
+
+```{r}
+# Plot the Degrees of Desireable Males
+# Remove NAs from the degrees data features
+
+m.d.degree <- subset(topmalequarter, complete.cases(topmalequarter$field_cd))
+```
+
+```{r}
+# Plot the Ages of Desireable Males
+
+m.d.degree_plot <- ggplot(m.d.degree, aes(x = field_cd)) + geom_bar(fill="steelblue")
+m.d.degree_plot + coord_flip() +ggtitle("Degrees for Desireable Males") + xlab("Degrees") + ylab("Count")
+
+```
+
+
+```{r}
+# Plot the Ages of Undesireable Males
+# Remove NAs from the ages data features
+
+m.und.degree <- subset(bottommalequarter, complete.cases(bottommalequarter$field_cd))
+```
+
+```{r}
+# Plot the Ages of Undesireable Males
+
+m.und.degree_plot <- ggplot(m.und.degree, aes(x = field_cd)) + geom_bar(fill="tomato")
+m.und.degree_plot +coord_flip() +ggtitle("Degrees for Undesireable Males") + xlab("Degrees") + ylab("Count")
+
+```
+
+```{r}
+# Plot the Degrees of Desireable Females
+# Remove NAs from the degrees data features
+
+f.d.degree <- subset(topfemalequarter, complete.cases(topfemalequarter$field_cd))
+```
+
+```{r}
+# Plot the Degrees of Desireable Feales
+
+f.d.degree_plot <- ggplot(f.d.degree, aes(x = field_cd)) + geom_bar(fill="steelblue")
+f.d.degree_plot + coord_flip() +ggtitle("Degrees for Desireable Females") + xlab("Degrees") + ylab("Count")
+
+```
+
+
+```{r}
+# Plot the Degrees of Undesireable Females
+# Remove NAs from the ages data features
+
+f.und.degree <- subset(bottomfemalequarter, complete.cases(bottomfemalequarter$field_cd))
+```
+
+```{r}
+# Plot the Degrees of Undesireable Males
+
+f.und.degree_plot <- ggplot(f.und.degree, aes(x = field_cd)) + geom_bar(fill="tomato")
+f.und.degree_plot +coord_flip() +ggtitle("Degrees for Undesireable Females") + xlab("Degrees") + ylab("Count")
+
+```
+
+## What are the common trends between people's interests? 
+
+```{r}
+# Create a correlation matrix to identify trends in shared interests 
+
+# Create a correlation matrix of interests
+cor_i <- round(cor(dd_prof[ ,c(9,10,16:32)], use = "complete.obs"),2)
+cor_i
+```
+
+
+```{r}
+# Visualize the correlation matrix using dots 
+corrplot(cor_i, type = "upper", order = "hclust", tl.col = "black", tl.srt = 45)
+```
+
+There is a relatively high correlation between "artsy" activities such as theater, museums, art, movies, concerts, and music, and "sporty" activities such as exercise, sports, and tvsports. Importance of race is also linked to importance of religion, with a correlation of 0.42. 
+
+## Ivy League Comparison
+
+```{r}
+# Create a new data set so that the master set isn't overrun
+mydata <- dd_prof
+```
+
+```{r}
+# With many different inputs in the undergrad column refering to the same school, I tried to convert them to one common name
+num_samples = dim(mydata)[1]
+mydata$undergra <- as.character(mydata$undergra)
+
+for (i in 1:num_samples){
+  if(mydata$undergra[i] %in% c("Columbia", "columbia", "ColumbiaU"))
+     {
+    mydata$undergra[i] = "Columbia University"
+  }
+}
+# After reviewing the data even more, I noticed that there were multiple different entries for all ivey league school
+```
+
+```{r}
+# Create a vector that includes what character strings to search for to identify ivy league schools. Done partly manually, by checking in excel all the different entries for a school
+searchfinal <- c("Brown University", "Brown", "brown", "Columbia University", "Cornell University", "Cornell", "cornell", "Dartmouth College", "Harvard University", "Harvard", "harvard", "Princeton University", "Princeton", "princeton", "University of Pennsylvania", "UPenn", "Pennsyl", "pennsyl", "Yale University", "Yale", "yale")
+
+num_searchs = length(searchfinal)
+```
+
+```{r}
+# Convert undergrad into binary variable
+# https://www.google.ca/search?q=ivy+league+schools&oq=ivy+league+school&aqs=chrome.0.35i39j69i57j0l4.4251j0j7&sourceid=chrome&ie=UTF-8
+# The link was used above to determine ivy league or not. Any values not entered or not ivy league we 0s
+mydata$ivyleague <- grepl(paste(searchfinal, collapse = "|"), mydata$undergra)
+
+mydata$ivyleague <- as.integer(mydata$ivyleague)
+summary(mydata$ivyleague)
+```
+
+We can now include this in our predictive modeling if we want. It will only be considered if we are having significant troubles increasing the error on our model. All participants of the study are at Columbia University, therefore likely have similar education levels.
+
+```{r}
+# Find average ratings for each person
+for (i in 1:max(mydata$iid)){
+    mydata$attr_avg[mydata$iid == i] <- mean(dd_raw[dd_raw$iid == i & is.na(dd_raw$attr_o) == FALSE,"attr_o"])
+    mydata$sinc_avg[mydata$iid == i] <- mean(dd_raw[dd_raw$iid == i & is.na(dd_raw$sinc_o) == FALSE,"sinc_o"])
+    mydata$intel_avg[mydata$iid == i] <- mean(dd_raw[dd_raw$iid == i & is.na(dd_raw$intel_o) == FALSE,"intel_o"])
+    mydata$fun_avg[mydata$iid == i] <- mean(dd_raw[dd_raw$iid == i & is.na(dd_raw$fun_o) == FALSE,"fun_o"])
+    mydata$amb_avg[mydata$iid == i] <- mean(dd_raw[dd_raw$iid == i & is.na(dd_raw$amb_o) == FALSE,"amb_o"])
+}
+# Group ratings by Ivy and non-Ivy participants
+mydata$ivyleague <- as.factor(mydata$ivyleague)
+mydata <- mydata %>%
+  group_by(ivyleague) %>%
+  summarise(attr_avg = mean(attr_avg), 
+            sinc_avg = mean(sinc_avg), 
+            intel_avg = mean(intel_avg), 
+            fun_avg = mean(fun_avg), 
+            amb_avg = mean(amb_avg))
+mydata
+```
+
+Comparitively, Ivy school students are considered more intelligent and ambitious than their peers, which makes logical sense. However, they are also considered less attractive, sincere, and fun. That being said, the margins are very tight and may not represent a significant difference.
+
+## What do you look for in the opposite sex?
+
+```{r}
+# Pull dataset for survey responses 1_1
+all11 <- pull_feat("1_1")
+# Check data integrity
+check_na(all11)
+# Clean data
+attribute <- c("attr1_1","sinc1_1","intel1_1","fun1_1","amb1_1","shar1_1")
+all11 <- norm_clean(all11,scale = TRUE)
+check_na(all11)
+```
+
+```{r}
+# Prepare variables for radar chart
+male11 <- c()
+female11 <- c()
+for (i in 1:6){
+  male11[i] <- mean(all11[all11$gender == 1,attribute[i]])
+  female11[i] <- mean(all11[all11$gender == 0,attribute[i]])
+}
+
+# Create radar chart
+rc_output(male11,female11,
+          max = 35,
+          min = 0,
+          colour1 = mal1,
+          colour2 = fem1,
+          chart_title = "What do you look for in a potential date?",
+          legend1 = "Male",
+          legend2 = "Female")
+```
+
+Men admit that attractiveness is the most important attribute when selecting a date, while women's responses were well-rounded.
+
+## What does the opposite sex look for?
+
+```{r}
+# Pull dataset for survey responses 2_1
+all21 <- pull_feat("2_1")
+# Check data integrity
+check_na(all21)
+# Clean data
+attribute <- c("attr2_1","sinc2_1","intel2_1","fun2_1","amb2_1","shar2_1")
+all21 <- norm_clean(all21,scale = TRUE)
+check_na(all21)
+```
+
+```{r}
+# Prepare variables for radar chart
+male21 <- c()
+female21 <- c()
+for (i in 1:6){
+  male21[i] <- mean(all21[all21$gender == 1,attribute[i]])
+  female21[i] <- mean(all21[all21$gender == 0,attribute[i]])
+}
+
+# Create radar chart
+rc_output(male21,female21,
+          max = 35,
+          min = 0,
+          colour1 = mal1,
+          colour2 = fem1,
+          chart_title = "What does the opposite sex look for in a potential date?",
+          legend1 = "Male",
+          legend2 = "Female")
+```
+
+Women believe that men value attractiveness above all. Men think women value attractiveness over other characteristics.
+
+## What does your sex look for?
+
+```{r}
+# Pull dataset for survey responses 4_1
+all41 <- pull_feat("4_1")
+# Check data integrity
+check_na(all41)
+# Clean data
+attribute <- c("attr4_1","sinc4_1","intel4_1","fun4_1","amb4_1","shar4_1")
+all41 <- norm_clean(all41,scale = TRUE)
+check_na(all41)
+```
+
+```{r}
+# Prepare variables for radar chart
+male41 <- c()
+female41 <- c()
+for (i in 1:6){
+  male41[i] <- mean(all41[all41$gender == 1,attribute[i]])
+  female41[i] <- mean(all41[all41$gender == 0,attribute[i]])
+}
+
+# Create radar chart
+rc_output(male41,female41,
+          max = 35,
+          min = 0,
+          colour1 = mal1,
+          colour2 = fem1,
+          chart_title = "What does the opposite sex look for in a potential date?",
+          legend1 = "Male",
+          legend2 = "Female")
+```
+
+Both men and women believe that other members of their gender value attractiveness more than they individually do.
+
+## How accurately do people rate themselves?
+
+# Do people believe others perceive them differently than how they perceive themselves?
+
+```{r}
+# Pull dataset for survey responses 5_1
+all31 <- pull_feat("3_1")
+# Check data integrity
+check_na(all31)
+# Clean data
+attribute <- c("attr3_1","sinc3_1","intel3_1","fun3_1","amb3_1")
+all31 <- norm_clean(all31,scale = FALSE)
+check_na(all31)
+```
+
+```{r}
+# Pull dataset for survey responses 5_1
+all51 <- pull_feat("5_1")
+# Check data integrity
+check_na(all51)
+# Clean data
+attribute <- c("attr5_1","sinc5_1","intel5_1","fun5_1","amb5_1")
+all51 <- norm_clean(all51,scale = FALSE)
+check_na(all51)
+```
+
+```{r}
+male31 <- c()
+female31 <- c()
+male51 <- c()
+female51 <- c()
+attribute <- c("attr3_1","sinc3_1","intel3_1","fun3_1","amb3_1")
+for (i in 1:5){
+  male31[i] <- mean(all31[all31$gender == 1,attribute[i]])
+  female31[i] <- mean(all31[all31$gender == 0,attribute[i]])
+}
+attribute <- c("attr5_1","sinc5_1","intel5_1","fun5_1","amb5_1")
+for (i in 1:5){
+  male51[i] <- mean(all51[all51$gender == 1,attribute[i]])
+  female51[i] <- mean(all51[all51$gender == 0,attribute[i]])
+}
+
+# Create radar chart
+rc_output(male31,male51,
+          max = 10,
+          min = 0,
+          colour1 = mal1,
+          colour2 = mal2,
+          chart_title = "Male self vs. perceived ratings",
+          legend1 = "How do you rate yourself",
+          legend2 = "How do you believe 
+others perceive you")
+
+# Create radar chart
+rc_output(female31,female51,
+          max = 10,
+          min = 0,
+          colour1 = fem1,
+          colour2 = fem2,
+          chart_title = "Female self vs. perceived ratings",
+          legend1 = "How do you rate yourself",
+          legend2 = "How do you believe 
+others perceive you")
+```
+
+People think that others perceive them as they perceive themselves.
+
+# Self-ratings vs. partner ratings
+
+```{r}
+# Load the average ratings from each participants dates
+dd_ratings <- dd_raw %>%
+  select(iid, gender, attr3_1, sinc3_1, intel3_1, fun3_1, amb3_1, attr5_1, sinc5_1, intel5_1, fun5_1, amb5_1) %>%
+  unique()
+
+# Load the average ratings from each participants dates
+for (i in 1:max(dd_ratings$iid)){
+    dd_ratings$attr_avg[dd_ratings$iid == i] <- mean(dd_raw[dd_raw$iid == i & is.na(dd_raw$attr_o) == FALSE,"attr_o"])
+    dd_ratings$sinc_avg[dd_ratings$iid == i] <- mean(dd_raw[dd_raw$iid == i & is.na(dd_raw$sinc_o) == FALSE,"sinc_o"])
+    dd_ratings$intel_avg[dd_ratings$iid == i] <- mean(dd_raw[dd_raw$iid == i & is.na(dd_raw$intel_o) == FALSE,"intel_o"])
+    dd_ratings$fun_avg[dd_ratings$iid == i] <- mean(dd_raw[dd_raw$iid == i & is.na(dd_raw$fun_o) == FALSE,"fun_o"])
+    dd_ratings$amb_avg[dd_ratings$iid == i] <- mean(dd_raw[dd_raw$iid == i & is.na(dd_raw$amb_o) == FALSE,"amb_o"])
+}
+```
+
+```{r}
+# Plot difference between self-perception and date ratings
+male_avg_o <- c()
+female_avg_o <- c()
+attribute <- c("attr_avg","sinc_avg","intel_avg","fun_avg","amb_avg")
+for (i in 1:5){
+  male_avg_o[i] <- mean(dd_ratings[dd_ratings$gender == 1, attribute[i]])
+  female_avg_o[i] <- mean(dd_ratings[dd_ratings$gender == 0, attribute[i]])
+}
+
+# Create radar chart
+rc_output(female31,female_avg_o,
+          max = 10,
+          min = 0,
+          colour1 = fem1,
+          colour2 = fem2,
+          chart_title = "Female accuracy of self ratings",
+          legend1 = "Self rating",
+          legend2 = "Date rating")
+
+# Create radar chart
+rc_output(male31,male_avg_o,
+          max = 10,
+          min = 0,
+          colour1 = mal1,
+          colour2 = mal2,
+          chart_title = "Male accuracy of self ratings",
+          legend1 = "Self rating",
+          legend2 = "Date rating")
+```
+
+Both men and women rate themselves higher than their partners did.
+
+## Do people know what they actually want?
+
+```{r}
+# Create new dataset containing id, gender, rating variables, and decision
+coef_data <- dd_raw %>%
+  select(iid,gender,pid,pgender,attr,sinc,intel,fun,amb,shar,like,dec)
+
+# Summarise data by personal preferences
+coef_data <- coef_data %>%
+  group_by(pid,pgender) %>%
+  summarise(Attractive = mean(attr), Sincere = mean(sinc), Intelligent = mean(intel), Fun = mean(fun), Ambitious = mean(amb), Interests = mean(shar), Like = mean(like), Decision = mean(dec))
+
+
+coef_attr <- coef_data %>%
+  select(pid, pgender, Attractive, Like, Decision) %>%
+  filter(!Attractive == "NA")
+coef_sinc <- coef_data %>%
+  select(pid, pgender, Sincere, Like, Decision) %>%
+  filter(!Sincere == "NA")
+coef_intel <- coef_data %>%
+  select(pid, pgender, Intelligent, Like, Decision) %>%
+  filter(!Intelligent == "NA")
+coef_fun <- coef_data %>%
+  select(pid, pgender, Fun, Like, Decision) %>%
+  filter(!Fun == "NA")
+coef_amb <- coef_data %>%
+  select(pid, pgender, Ambitious, Like, Decision) %>%
+  filter(!Ambitious == "NA")
+coef_shar <- coef_data %>%
+  select(pid, pgender, Interests, Like, Decision) %>%
+  filter(!Interests == "NA")
+
+# Find gendered preferences 
+
+cor_attr_m <- cor(coef_attr$Attractive[coef_attr$pgender == 0], coef_attr$Decision[coef_attr$pgender == 0])
+cor_attr_f <- cor(coef_attr$Attractive[coef_attr$pgender == 1], coef_attr$Decision[coef_attr$pgender == 1])
+
+cor_sinc_m <- cor(coef_sinc$Sincere[coef_sinc$pgender == 0], coef_sinc$Decision[coef_sinc$pgender == 0])
+cor_sinc_f <- cor(coef_sinc$Sincere[coef_sinc$pgender == 1], coef_sinc$Decision[coef_sinc$pgender == 1])
+
+cor_intel_m <- cor(coef_intel$Intelligent[coef_intel$pgender == 0], coef_intel$Decision[coef_intel$pgender == 0])
+cor_intel_f <- cor(coef_intel$Intelligent[coef_intel$pgender == 1], coef_intel$Decision[coef_intel$pgender == 1])
+
+cor_fun_m <- cor(coef_fun$Fun[coef_fun$pgender == 0], coef_fun$Decision[coef_fun$pgender == 0])
+cor_fun_f <- cor(coef_fun$Fun[coef_fun$pgender == 1], coef_fun$Decision[coef_fun$pgender == 1])
+
+cor_amb_m <- cor(coef_amb$Ambitious[coef_amb$pgender == 0], coef_amb$Decision[coef_amb$pgender == 0])
+cor_amb_f <- cor(coef_amb$Ambitious[coef_amb$pgender == 1], coef_amb$Decision[coef_amb$pgender == 1])
+
+cor_shar_m <- cor(coef_shar$Interests[coef_shar$pgender == 0], coef_shar$Decision[coef_shar$pgender == 0])
+cor_shar_f <- cor(coef_shar$Interests[coef_shar$pgender == 1], coef_shar$Decision[coef_shar$pgender == 1])
+
+# Create vectors containing correlation coefficients for plotting
+cor_male <- c(cor_attr_m,cor_sinc_m,cor_intel_m,cor_fun_m,cor_amb_m,cor_shar_m)
+cor_female <- c(cor_attr_f,cor_sinc_f,cor_intel_f,cor_fun_f,cor_amb_f,cor_shar_f)
+
+# Normalize correlation scores across 100 point distribution to match survey data
+cor_male_s <- sum(cor_male)
+cor_female_s <- sum(cor_female)
+for (i in 1:6){
+  cor_male[i] <- round(cor_male[i]/cor_male_s*100,2)
+  cor_female[i] <- round(cor_female[i]/cor_female_s*100,2)
+}
+round(cor_male,0)
+round(cor_female,0)
+```
+
+
+```{r}
+rc_output(male11,cor_male,
+          max = 35,
+          min = 0,
+          colour1 = mal1,
+          colour2 = mal2,
+          chart_title = "Male stated vs. actual decision criteria",
+          legend1 = "Stated preferences",
+          legend2 = "Actual preferences")
+
+rc_output(female11,cor_female,
+          max = 35,
+          min = 0,
+          colour1 = fem1,
+          colour2 = fem2,
+          chart_title = "Female stated vs. actual decision criteria",
+          legend1 = "Stated preferences",
+          legend2 = "Actual preferences")
+```
+
+This shows that the actual decision-making process is very different than what people admit their preferences are.
+
+## Order changes
+
+```{r}
+dd_order <- dd_raw %>%
+  select(iid,order,round,attr,sinc,intel,fun,amb,shar,dec)
+
+# Determine if it is a first or last date
+dd_order$first <- ifelse(dd_order$order == 1, 1, 0)
+dd_order$last <- ifelse(dd_order$order == dd_order$round, 1, 0)
+firstdate <- mean(dd_order$dec[dd_order$first == 1])
+lastdate <- mean(dd_order$dec[dd_order$last == 1])
+middledate <- mean(dd_order$dec[dd_order$first == 0 & dd_order$last == 0])
+
+# Remodel for output
+firstvlast <- cbind(c("First", "Middle", "Last"),rbind(firstdate,middledate,lastdate))
+colnames(firstvlast) <- c("DateOrder","ProbYes")
+firstvlast <- as.data.frame(firstvlast)
+firstvlast$ProbYes <- as.numeric(as.character(firstvlast$ProbYes))
+firstvlast$DateOrder <- factor(firstvlast$DateOrder, levels=c("First","Middle","Last"))
+
+# Create comparative histogram
+ggplot(data = firstvlast,aes(y = ProbYes, x = DateOrder, fill = DateOrder)) +
+  geom_bar(position = "dodge",stat = "identity") + 
+  xlab("Order of Date in Round") +
+  ylab("Probability of Getting a Yes")
+  
+```
+
+People are more likely to give dates at the beginning or end of the session, probably due to desparation.
+
+#### Cluster Analysis
+
+The cluster analysis was based on individuals interest ratings. Our first basic modeling techniques of logistic regression and decision trees, ranked  shared interests as the third most relevant metric when choosing to go on a date. If we cluster the unsupervised interests data, some of the possible analysis include:
+
+1. Are some types of people just in general more likely to get a match?
+2. Are you more likely to say yes if your partner is the same type of person? Or is it the opposite?
+
+```{r}
+# Start by selecting the interest variables associated with each iid
+mydata2 <- datingprofiles %>%
+  select(iid,sports,tvsports,exercise,dining,museums,art,hiking,gaming,clubbing,reading,tv,theater,movies,concerts,music,shopping,yoga)
+```
+
+```{r}
+# Scale the columns that we are using to cluster. 
+mydata2[,2:18] <- lapply(mydata2[2:18], scale)
+mydata2 <- mydata2[complete.cases(mydata2),]
+```
+
+Even though the data was rated on a scale of 0 to 10, it is likely that some people maybe voted high on everything or low on everything, scewing the excpeted mean and stdev. To make the data meaningful in a k-means analysis, it was normalized using the scale function. This normalized using z-score. All NAs were deleted.
+
+```{r}
+# Test out multiple cluster options to see what is the best fit. Only run analysis on interests, not iid.
+library(tidyverse)
+library(cluster)
+library(factoextra)
+totalwithnss = c()
+
+for(clusters in 3:30)
+{
+  fit <- kmeans(mydata2[,2:18], clusters) 
+  totalwithnss[clusters] <- sum(fit$withinss)
+  fviz_cluster(fit, data = mydata2[,2:18])[clusters]
+}
+plot(totalwithnss)
+```
+
+Although the withness continued to drop, we stuck with 3 clusters as the optimal number. The only trend in withness was its diminishing value, so we assumed it was constantly overfitting itself. When analyzing the values distinct features of each cluster, it made most sense to evaluate inidividuals into 3 clusters.
+
+
+```{r}
+# Run a few clusters and plot them to get another visual analysis. 
+k3 <- kmeans(mydata2[,2:18], 3)
+k4 <- kmeans(mydata2[,2:18], 4)
+k5 <- kmeans(mydata2[,2:18], 5)
+k6 <- kmeans(mydata2[,2:18], 6)
+k7 <- kmeans(mydata2[,2:18], 7)
+k8 <- kmeans(mydata2[,2:18], 8)
+k9 <- kmeans(mydata2[,2:18], 9)
+k10 <- kmeans(mydata2[,2:18], 10)
+k11 <- kmeans(mydata2[,2:18], 11)
+k20 <- kmeans(mydata2[,2:18], 20)
+
+fviz_cluster(k3, geom = "point", data = mydata2[,2:18])
+fviz_cluster(k4, geom = "point", data = mydata2[,2:18])
+fviz_cluster(k5, geom = "point", data = mydata2[,2:18])
+fviz_cluster(k6, geom = "point", data = mydata2[,2:18])
+fviz_cluster(k7, geom = "point", data = mydata2[,2:18])
+fviz_cluster(k8, geom = "point", data = mydata2[,2:18])
+fviz_cluster(k9, geom = "point", data = mydata2[,2:18])
+fviz_cluster(k10, geom = "point", data = mydata2[,2:18])
+fviz_cluster(k11, geom = "point", data = mydata2[,2:18])
+fviz_cluster(k20, geom = "point", data = mydata2[,2:18])
+
+
+fit <- as.data.frame(k3$cluster)
+
+# Merge the cluster numbers to the mydata (profiles) data set so that each iid has an associated cluster, and we can then analyze each clusters traits based on the individuals included in the cluster.
+new <- cbind(mydata2, fit)
+
+#export to a png for the presentatio
+```
+
+After running all the options for clusters above, 3 clusters was the best fit. Its results were turned into a data frame, and binded with the mydata so that the results and interests ratings could be interpreted on a per cluster basis. My data could be overwritten with the unscaled data by re-writing it, and deleting the NAs. They were merged this w
+
+```{r}
+# Create a summary of each clusters average rating for their interests.
+#summary(new[new$`k4$cluster` == 1,])
+
+cluster1means <- c()
+for(i in 2:(dim(new)[2]-1)){
+  cluster1means[i-1] <- mean(new[new$`k3$cluster` == 1,i])
+}
+
+cluster2means <- c()
+for(i in 2:(dim(new)[2]-1)){
+  cluster2means[i-1] <- mean(new[new$`k3$cluster` == 2,i])
+}
+
+
+cluster3means <- c()
+for(i in 2:(dim(new)[2]-1)){
+  cluster3means[i-1] <- mean(new[new$`k3$cluster` == 3,i])
+}
+
+
+names(new)[2:19]
+
+cluster.means <- as.data.frame(rbind(cluster1means, cluster2means, cluster3means))
+colnames(cluster.means) <- names(new)[2:18]
+cluster.means
+
+#write.csv(cluster.means, "cluster.means2.0.csv")
+
+```
+
+From this analysis, you can see there are distinct differences among the clusters. We have established clusters 1, 2 and 3 with identifications Enthusiast, Jocks and Artistic respectively. The Enthusiats in general have a much higher average rating compared to both clusters. They seem to like sports and activity just as much as arts. The Jocks have more weight on exercise and sports, however rated more variables lower then both clusters. The Artistic cluster had low sport ratings, and high ratings on art, museums, theatre. They were more enthusiastic in interest ratings than Jocks.
+
+## Predictive Modelling
+
+```{r}
+# Find average ratings for each participant based on partner responses
+avg_ratings <- dd_raw %>%
+  group_by(pid,pgender) %>%
+  summarise(attr = mean(attr[is.na(attr) == FALSE]),
+            sinc = mean(sinc[is.na(sinc) == FALSE]),
+            intel = mean(intel[is.na(intel) == FALSE]),
+            fun = mean(fun[is.na(fun) == FALSE]),
+            amb = mean(amb[is.na(amb) == FALSE]),
+            shar = mean(shar[is.na(shar) == FALSE])) %>%
+  filter(!pid == 118)
+
+avg_ratings
+# Check for NA values
+variable <- c()
+nulls <- c()
+for (i in 1:dim(avg_ratings)[2]){
+  variable[i] <- names(avg_ratings)[i]
+  nulls[i] <- sum(is.na(avg_ratings[,i]))
+}
+data.frame(variable, nulls)
+```
+
+```{r}
+dd_clean_rating <- dd_raw %>%
+  select(iid,gender,pid,pgender,attr,sinc,intel,fun,amb,shar,dec) %>%
+  filter(!pid == 118)
+dd_clean_rating <- dd_clean_rating %>%
+  select(-pid,-pgender)
+
+# Check for NAs
+check_na(dd_clean_rating)
+
+# Assign "true" attribute value for NAs (average of all valid partner responses)
+attribute <- c("attr","sinc","intel","fun","amb","shar")
+for (i in 1:dim(dd_clean_rating)[1]){
+  for (j in 1:length(attribute)){
+    if (is.na(dd_clean_rating[i,attribute[j]]) == TRUE){
+      dd_clean_rating[i,attribute[j]] <- avg_ratings[match(dd_clean_rating$iid[i],avg_ratings$pid),attribute[j]]
+    }
+  }
+}
+check_na(dd_clean_rating)
+```
+
+```{r}
+# Remove iid and set gender and dec to factors
+dd_clean_rating <- dd_clean_rating %>%
+  select(-iid,-gender)
+dd_clean_rating$dec <- as.factor(dd_clean_rating$dec)
+num_samples = dim(dd_clean_rating)[1]
+num_features = dim(dd_clean_rating)[2]
+```
+
+## KNN
+```{r}
+dd_clean_norm <- dd_clean_rating
+
+# Normalize the data
+for (i in 1:num_samples){
+  for (j in 1:(num_features-1)){
+      dd_clean_norm[i,j] <- (dd_clean_norm[i,j]-mean(dd_clean_norm[,j]))/sd(dd_clean_norm[,j])
+  }
+} 
+```
+
+```{r}
+# Create training and testing sets
+sampling.rate = 0.8
+training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+trainingSet <- dd_clean_norm[training, ]
+testing <- setdiff(1:num_samples,training)
+testingSet <- dd_clean_norm[testing, ]
+
+# Create features and labels for knn
+trainingfeatures <- subset(trainingSet, select=c(-dec))
+traininglabels <- trainingSet$dec
+testingfeatures <- subset(testingSet, select=c(-dec))
+```
+
+```{r}
+k_errors <- c()
+k_value <- c()
+error <- c()
+sizeTestSet = dim(testingSet)[1]
+for (i in 1:100){
+  predictedLabels = knn(trainingfeatures,testingfeatures,traininglabels,k=i)
+  error = sum(predictedLabels != testingSet$dec)
+  k_errors[i] <- error/sizeTestSet
+  k_value[i] <- i
+}
+k_data <- data.frame(k_value, k_errors)
+min_k <- min(k_errors)
+k_data[k_data$k_errors == min_k,]
+```
+
+KNN model shows that k = 49 is the best k, with an approximate error of 27%
+
+```{r}
+predictedLabels <- knn(trainingfeatures,testingfeatures,traininglabels,k=49)
+IsWrong <- (predictedLabels != testingSet$dec)
+IsYes <- (predictedLabels == 1)
+error_rate <- sum(IsWrong)/sizeTestSet
+false_positives <- sum(IsWrong & IsYes)
+false_pos_rate <- false_positives/sizeTestSet
+error_rate
+false_pos_rate
+```
+
+## Random Forest
+
+```{r}
+# Create training and testing sets
+sampling.rate = 0.8
+training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+trainingSet <- dd_clean_rating[training, ]
+testing <- setdiff(1:num_samples,training)
+testingSet <- dd_clean_rating[testing, ]
+
+```
+
+```{r}
+rf_model <- randomForest(dec ~ ., data = trainingSet, method = "class")
+plot(rf_model)
+legend("top", colnames(rf_model$err.rate),fill=1:3)
+```
+
+```{r}
+predictedLabels <- predict(rf_model, testingSet)
+IsWrong <- (predictedLabels != testingSet$dec)
+IsYes <- (predictedLabels == 1)
+error_rate <- sum(IsWrong)/sizeTestSet
+false_positives <- sum(IsWrong & IsYes)
+false_pos_rate <- false_positives/sizeTestSet
+error_rate
+false_pos_rate
+```
+
+Random forest shows slight improvement over KNN with 24% error rate. False positive rate is ~12%, relatively promising predictability.
+
+## Logistic Regression
+
+```{r}
+logreg_model <- glm(dec ~ . - intel, data = trainingSet, family = binomial(logit))
+summary(logreg_model)
+```
+
+```{r}
+error_rate <- c()
+false_pos_rate <- c()
+rounding_point <- c()
+for(i in 1:9){
+  predictions <- predict(logreg_model, testingSet, type = "response")
+  for(j in 1:length(predictions)){
+    if(predictions[j] <= i/10){
+      predictions[j] <- 0
+    }
+    if(predictions[j] > i/10){
+      predictions[j] <- 1
+    }
+  }
+  sizeTestSet = dim(testingSet)[1]
+  IsWrong <- (predictions != testingSet$dec)
+  IsYes <- (predictions == 1)
+  rounding_point[i] <- i/10
+  error_rate[i] <- sum(IsWrong)/sizeTestSet
+  false_positives <- sum(IsWrong & IsYes)
+  false_pos_rate[i] <- false_positives/sizeTestSet
+}
+logreg_table <- cbind(rounding_point,error_rate,false_pos_rate)
+colnames(logreg_table) <- c("Rounding Point", "Misclassisfication Rate", "False Positive Rate")
+logreg_table
+```
+
+Logistic regression gives an error rate of ~23%, which is slightly better than the other models but not by much. There seems to be a predicitive limit based on the data in the model, and we will look to improve this by adding more predictive variables. When considering the rounding point, 0.5 proves to be the most accurate. However, if we are mostly concerned with false positives, we can increase the rounding point to 0.7 and have an error rate comparable to KNN (~29%), with a false positive rate of only ~6%.
+
+## SVM
+
+```{r}
+svm_model <- svm(dec ~ ., data = trainingSet, kernel = "linear", cost = 100)
+predictedLabels <- predict(svm_model,testingSet)
+IsWrong <- (predictedLabels != testingSet$dec)
+IsYes <- (predictedLabels == 1)
+error_rate <- sum(IsWrong)/sizeTestSet
+false_positives <- sum(IsWrong & IsYes)
+false_pos_rate <- false_positives/sizeTestSet
+error_rate
+false_pos_rate
+```
+
+SVM had a slightly lower error than the other models, but was still very close.
+
+## Importance of Race & Religion
+
+```{r}
+# Create data subset that includes ratings, race info, and decision
+dd_race <- dd_raw %>%
+  select(iid,pid,attr,sinc,intel,amb,fun,shar,imprace,samerace,dec) %>%
+  filter(!pid == "118") %>%
+  filter(!imprace == "NA") %>%
+  filter(!samerace == "NA")
+
+# Fill in ratings for any NAs based on partner responses
+attribute <- c("attr","sinc","intel","fun","amb","shar")
+for (i in 1:dim(dd_race)[1]){
+  for (j in 1:length(attribute)){
+    if (is.na(dd_race[i,attribute[j]]) == TRUE){
+      dd_race[i,attribute[j]] <- avg_ratings[match(dd_race$iid[i],avg_ratings$pid),attribute[j]]
+    }
+  }
+}
+
+# Look at likelihood of saying yes for same race and different race partners depending on degree of importance of race in selecting a date
+dd_race_1 <- dd_race %>%
+  group_by(imprace) %>%
+  summarise("Percent SR Yes" = sum(dec[samerace == 1])/sum(samerace == 1),
+            "Percent DR Yes" = sum(dec[samerace == 0])/sum(samerace == 0)) %>%
+  filter(!imprace == 0)
+dd_race_1$Difference <- dd_race_1$`Percent SR Yes` - dd_race_1$`Percent DR Yes`
+dd_race_1$imprace <- as.factor(dd_race_1$imprace)
+
+# Plot the data
+ggplot(data = dd_race_1, aes(imprace,Difference)) +
+  geom_bar(position="dodge", stat="identity") + 
+  xlab("Importance of Race to Respondent") + 
+  ylab("Percentage Increase of Yes for Same Race")
+```
+
+Those who value race show a noticeable discrimination to those of a different race when selecting a date.
+
+```{r}
+# Create data subset that includes ratings, race info, and decision
+dd_relig <- dd_raw %>%
+  select(iid,pid,attr,sinc,intel,amb,fun,shar,imprelig,samerace,dec) %>%
+  filter(!pid == "118") %>%
+  filter(!imprelig == "NA")
+summary(dd_relig)
+
+# Fill in ratings for any NAs based on partner responses
+attribute <- c("attr","sinc","intel","fun","amb","shar")
+for (i in 1:dim(dd_relig)[1]){
+  for (j in 1:length(attribute)){
+    if (is.na(dd_relig[i,attribute[j]]) == TRUE){
+      dd_relig[i,attribute[j]] <- avg_ratings[match(dd_relig$iid[i],avg_ratings$pid),attribute[j]]
+    }
+  }
+}
+
+# Look at likelihood of saying yes to all respondents depending on importance of religion 
+dd_relig_1 <- dd_relig %>%
+  group_by(imprelig) %>%
+  summarise("Percent Yes" = sum(dec)/sum(sum(dec == 1),sum(dec == 0)))
+dd_relig_1$imprelig <- as.factor(dd_relig_1$imprelig)
+
+# Plot the data
+ggplot(data = dd_relig_1, aes(imprelig,`Percent Yes`)) + 
+  geom_bar(position = "dodge", stat = "identity") +
+  xlab("Importance of Religion to Respondent") +
+  ylab("Likelihood to Say Yes to a Date")
+```
+
+More religious participants are more selective when giving out dates
+
+## Models Round 2
+
+This was an attempt to see if adding race and religion data would add to the accuracy of the model.
+
+```{r}
+dd_modelling_2 <- dd_raw %>%
+  select(iid,gender,pid,imprace,imprelig,samerace,attr,sinc,intel,fun,amb,shar,dec) %>%
+  filter(!pid == 118) %>%
+  filter(!imprace == "NA") %>%
+  filter(!imprelig == "NA")
+
+dd_modelling_2 <- dd_modelling_2 %>%
+  select(-pid)
+
+# Check for NAs
+check_na(dd_modelling_2)
+
+# Assign "true" attribute value for NAs (average of all valid partner responses)
+attribute <- c("attr","sinc","intel","fun","amb","shar")
+for (i in 1:dim(dd_modelling_2)[1]){
+  for (j in 1:length(attribute)){
+    if (is.na(dd_modelling_2[i,attribute[j]]) == TRUE){
+      dd_modelling_2[i,attribute[j]] <- avg_ratings[match(dd_modelling_2$iid[i],avg_ratings$pid),attribute[j]]
+    }
+  }
+}
+check_na(dd_modelling_2)
+```
+
+```{r}
+# Remove iid and set gender and dec to factors
+dd_modelling_2 <- dd_modelling_2 %>%
+  select(-iid,-gender)
+dd_modelling_2$dec <- as.factor(dd_modelling_2$dec)
+num_samples = dim(dd_modelling_2)[1]
+num_features = dim(dd_modelling_2)[2]
+```
+
+## KNN
+```{r}
+# Normalize the data
+for (i in 1:num_samples){
+  for (j in 1:(num_features-1)){
+      dd_modelling_2[i,j] <- (dd_modelling_2[i,j]-mean(dd_modelling_2[,j]))/sd(dd_modelling_2[,j])
+  }
+} 
+
+# Create updated training and testing sets
+sampling.rate = 0.8
+training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+trainingSet <- dd_modelling_2[training, ]
+testing <- setdiff(1:num_samples,training)
+testingSet <- dd_modelling_2[testing, ]
+
+# Create features and labels for knn
+trainingfeatures <- subset(trainingSet, select=c(-dec))
+traininglabels <- trainingSet$dec
+testingfeatures <- subset(testingSet, select=c(-dec))
+```
+
+```{r}
+k_errors <- c()
+k_value <- c()
+error <- c()
+sizeTestSet = dim(testingSet)[1]
+for (i in 1:100){
+  predictedLabels = knn(trainingfeatures,testingfeatures,traininglabels,k=i)
+  error = sum(predictedLabels != testingSet$dec)
+  k_errors[i] <- error/sizeTestSet
+  k_value[i] <- i
+}
+k_data <- data.frame(k_value, k_errors)
+min_k <- min(k_errors)
+k_data[k_data$k_errors == min_k,]
+```
+
+No noticeable improvement with race/religion data. All other models were tested with similar results, showing that there is minimal improvement with this new data.
+
+### Can we predict the likelihood of a study subject going on a date with someone based on their demographic data? 
+
+```{r}
+num_samples = dim(dd_norm)[1]
+sampling.rate = 0.9
+training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE) 
+trainingSet <- dd_norm[training, ]
+testing <- setdiff(1:num_samples,training)
+testingSet <- dd_norm[testing, ]
+
+# Train decision tree with ratings data and imprace and imprelig 
+decModel_racerelig <- rpart(dec ~ attr + sinc + intel + fun + amb + shar + imprace + imprelig + samerace, data = trainingSet)
+# Plot decision tree model
+prp(decModel_racerelig)
+```
+
+
+
+```{r}
+# Train decision tree  
+decModel_predict <- rpart(dec ~ gender + samerace + imprace + goal + date + go_out + exphappy, data = trainingSet)
+# Plot decision tree model
+prp(decModel_predict)
+```
+```{r}
+# Predict using the decision model to find the misclassification rate 
+predictions <- predict(decModel_predict, testingSet)
+predictionLabels <- round(predictions)
+
+error <- sum(predictionLabels != testingSet$dec)
+misclassification_rate <- error/dim(testingSet)[1]
+misclassification_rate
+```
+
+When evaluating demographic variables from survey data filled out before the speed dating event, such as the subject's demogrpahic and psychogrpahic data, the only significant predictor variable is gender. If the subject is a woman, there is a ~ 36% that they will agree to go on a date. However, this model has an error rate of ~ 44%, which is worse than guessing (42%). Therefore, it is unlikely that a model can predict the likelihood of decision to go on a date based on broad demographic data.  
+
